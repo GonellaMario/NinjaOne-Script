@@ -1,0 +1,121 @@
+<#
+.SYNOPSIS
+  Upload di un file nella Knowledge Base GLOBALE di NinjaOne in una cartella specifica (folderId).
+
+.REQUIREMENTS
+  - Windows PowerShell 5.1
+  - Variabili d'ambiente:
+      NINJA_CLIENT_ID
+      NINJA_CLIENT_SECRET
+#>
+
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory=$false)]
+  [string]$BaseUrl = "https://sistemhinsspa.rmmservice.eu",
+
+  [Parameter(Mandatory=$false)]
+  [int]$FolderId = 24,
+
+  [Parameter(Mandatory=$true)]
+  [string]$FilePath
+)
+
+$ErrorActionPreference = "Stop"
+
+# ---------- Validazioni ----------
+if (-not (Test-Path -LiteralPath $FilePath)) {
+  throw "File non trovato: $FilePath"
+}
+
+$ClientId     = $env:NINJA_CLIENT_ID
+$ClientSecret = $env:NINJA_CLIENT_SECRET
+
+if ([string]::IsNullOrWhiteSpace($ClientId) -or [string]::IsNullOrWhiteSpace($ClientSecret)) {
+  throw "Imposta le variabili d'ambiente NINJA_CLIENT_ID e NINJA_CLIENT_SECRET."
+}
+
+# ---------- 1) OAuth Token ----------
+try {
+  $tokenResp = Invoke-RestMethod -Method Post `
+    -Uri "$BaseUrl/ws/oauth/token" `
+    -ContentType "application/x-www-form-urlencoded" `
+    -Body @{
+      grant_type    = "client_credentials"
+      client_id     = $ClientId
+      client_secret = $ClientSecret
+      scope         = "monitoring management"
+    }
+}
+catch {
+  throw "Errore ottenendo token OAuth: $($_.Exception.Message)"
+}
+
+$accessToken = $tokenResp.access_token
+if ([string]::IsNullOrWhiteSpace($accessToken)) {
+  throw "Token OAuth non ottenuto. Risposta: $($tokenResp | ConvertTo-Json -Depth 10)"
+}
+
+# ---------- 2) Upload multipart/form-data (HttpClient) ----------
+Add-Type -AssemblyName System.Net.Http
+
+$http = New-Object System.Net.Http.HttpClient
+$http.DefaultRequestHeaders.Authorization =
+  New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $accessToken)
+$http.DefaultRequestHeaders.Accept.Add(
+  (New-Object System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"))
+)
+
+$multipart = New-Object System.Net.Http.MultipartFormDataContent
+
+# KB GLOBALE: NON aggiungere organizationId
+$multipart.Add((New-Object System.Net.Http.StringContent($FolderId.ToString())), "folderId")
+
+$stream = [System.IO.File]::OpenRead($FilePath)
+try {
+  $fileContent = New-Object System.Net.Http.StreamContent($stream)
+  $fileContent.Headers.ContentType =
+    [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse("application/octet-stream")
+
+  # Campo corretto: "files" (plural)
+  $multipart.Add($fileContent, "files", [System.IO.Path]::GetFileName($FilePath))
+
+  # Alcuni tenant usano /v2, altri /api/v2: fallback automatico
+  $uris = @(
+    "$BaseUrl/v2/knowledgebase/articles/upload",
+    "$BaseUrl/api/v2/knowledgebase/articles/upload"
+  )
+
+  $resp = $null
+  $body = $null
+  $lastError = $null
+
+  foreach ($u in $uris) {
+    try {
+      $resp = $http.PostAsync($u, $multipart).Result
+      $body = $resp.Content.ReadAsStringAsync().Result
+
+      if ($resp.IsSuccessStatusCode) {
+        $lastError = $null
+        break
+      } else {
+        $lastError = "Tentativo: $u`nHTTP $([int]$resp.StatusCode) $($resp.ReasonPhrase)`n$body"
+      }
+    }
+    catch {
+      $lastError = "Tentativo: $u`nEccezione: $($_.Exception.Message)"
+    }
+  }
+
+  if (-not $resp -or -not $resp.IsSuccessStatusCode) {
+    throw "Upload fallito.`n$lastError"
+  }
+
+  # Output: prova a convertire in JSON
+  try { $body | ConvertFrom-Json } catch { $body }
+}
+finally {
+  if ($stream) { $stream.Dispose() }
+  if ($multipart) { $multipart.Dispose() }
+  if ($http) { $http.Dispose() }
+}
