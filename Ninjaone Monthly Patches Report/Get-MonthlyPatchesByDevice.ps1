@@ -295,7 +295,7 @@ function New-MinimalXlsxFromTables {
     #>
     param(
         [Parameter(Mandatory=$true)]
-        [System.Collections.IDictionary]$Sheets,  # <-- preserves [ordered] insertion order
+        [System.Collections.IDictionary]$Sheets,  # preserves [ordered] insertion order
 
         [Parameter(Mandatory=$true)]
         [string]$Path
@@ -354,7 +354,6 @@ function New-MinimalXlsxFromTables {
 
     $sheetId = 0
 
-    # IMPORTANT: enumerator preserves insertion order from [ordered]@
     foreach ($entry in $Sheets.GetEnumerator()) {
         $sheetName = [string]$entry.Key
         $rows      = @($entry.Value)
@@ -709,14 +708,23 @@ try {
             foreach ($pi in $swItems) {
                 if (-not $pi) { continue }
 
-                $pname = [string](Get-Prop $pi 'name')
+                # IMPORTANT: SW patch payloads often use "title" (not "name")
+                $title = $null
+                foreach ($k in @('title','name','patchName','productName','displayName')) {
+                    $tmp = Get-Prop $pi $k
+                    if ($tmp) { $title = [string]$tmp; break }
+                }
+                if (-not $title) { $title = "(unknown)" }
 
                 $swDetailRows.Add([pscustomobject]@{
-                    PatchName   = $pname
-                    KBNumber    = [string](Get-Prop $pi 'kbNumber')  # may be empty for SW patches
-                    Device      = [string]$dev.DeviceName
-                    InstalledAt = (Convert-EpochToLocalStringSafe (Get-Prop $pi 'installedAt'))
-                    DeviceId    = [int]$dev.DeviceId  # internal only (not exported)
+                    Title             = $title
+                    ProductIdentifier = [string](Get-Prop $pi 'productIdentifier')
+                    PatchId           = [string](Get-Prop $pi 'id')
+                    Impact            = [string](Get-Prop $pi 'impact')
+                    Status            = [string](Get-Prop $pi 'status')
+                    Device            = [string]$dev.DeviceName
+                    InstalledAt       = (Convert-EpochToLocalStringSafe (Get-Prop $pi 'installedAt'))
+                    DeviceId          = [int]$dev.DeviceId  # internal only (not exported)
                 }) | Out-Null
             }
         }
@@ -743,7 +751,7 @@ try {
         $swDetailRows |
         Sort-Object @{Expression={ $_.Device }; Descending=$false },
                     @{Expression={ $_.InstalledAt }; Descending=$true },
-                    @{Expression={ $_.PatchName }; Descending=$false }
+                    @{Expression={ $_.Title }; Descending=$false }
     )
 
     # Build summaries (arrays can be empty)
@@ -752,7 +760,9 @@ try {
 
     # Export sheets without DeviceId columns
     $osDetailForXlsx = @($osDetailSorted | Select-Object PatchName, KBNumber, Device, InstalledAt)
-    $swDetailForXlsx = @($swDetailSorted | Select-Object PatchName, KBNumber, Device, InstalledAt)
+
+    # SW PatchInstalls -> renamed columns
+    $swDetailForXlsx = @($swDetailSorted | Select-Object Title, ProductIdentifier, PatchId, Impact, Status, Device, InstalledAt)
 
     # ---- Create XLSX (4 sheets) ----
     $safeOrg  = ($orgName -replace '[\\/:*?"<>|]+', ' ').Trim()
