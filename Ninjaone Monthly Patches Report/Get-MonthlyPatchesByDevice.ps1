@@ -3,13 +3,13 @@ param(
     [Parameter()]
     [int]$Customer = 1,
 
-    # Format: YYYYMM (e.g. 202512). If empty, uses previous month.
+    # Format: YYYYMM (e.g. 202512). If empty, previous month is used.
     [Parameter()]
     [string]$ReportMonth = ""
 )
 
 begin {
-    # Ninja Script Form Variable override
+    # Ninja Script Form Variable overrides
     if ($env:customer -and $env:customer -notlike "null") { $Customer = [int]$env:customer }
     if ($env:reportMonth -and $env:reportMonth -notlike "null") { $ReportMonth = [string]$env:reportMonth }
 
@@ -23,16 +23,16 @@ process {
 
 # ==================== CONFIG ====================
 $PageSize              = 1000
-$LogEveryNDevices      = 10
-$ContinueOnDeviceError = $true
+$LogEveryNDevices       = 10
+$ContinueOnDeviceError  = $true
 
-# Patch filters
-$PatchStatus          = "INSTALLED"
-$ExcludeDefenderIntel = $true   # Exclude Defender Intelligence updates (e.g. KB2267602)
+# Patch query filters
+$PatchStatus            = "INSTALLED"
+$ExcludeDefenderIntel   = $true  # Exclude Microsoft Defender Intelligence Update noise (optional)
 
-# Output file
-$DocBaseTitle = "Windows Patch Report"
-$outDir       = "C:\ProgramData\NinjaRMMAgent\scripting\Reports"
+# Output settings
+$DocBaseTitle           = "Windows Patch Report"
+$outDir                 = "C:\ProgramData\NinjaRMMAgent\scripting\Reports"
 New-Item -Path $outDir -ItemType Directory -Force | Out-Null
 # ===============================================
 
@@ -41,10 +41,11 @@ New-Item -Path $outDir -ItemType Directory -Force | Out-Null
 if ($PSVersionTable.PSVersion.Major -lt 7) {
     try {
         if (!(Test-Path "$env:SystemDrive\Program Files\PowerShell\7")) {
-            Write-Output 'PowerShell 7 does not appear to be installed'
+            Write-Output 'PowerShell 7 is not installed.'
             exit 1
         }
-        $env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User')
+        $env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + `
+                    [System.Environment]::GetEnvironmentVariable('Path','User')
         pwsh -File "`"$PSCommandPath`"" @PSBoundParameters
     } catch {
         Write-Output 'PowerShell 7 was not installed. Update PowerShell and try again.'
@@ -73,7 +74,12 @@ function Get-Prop($obj, [string]$name) {
 }
 
 function Normalize-ToArray {
+    <#
+      Normalizes various API payload shapes into a plain array.
+      Supports common property containers: items, data, results, etc.
+    #>
     param([object]$obj)
+
     if ($null -eq $obj) { return @() }
     if ($obj -is [string]) { return @($obj) }
     if ($obj -is [System.Array]) { return $obj }
@@ -87,6 +93,7 @@ function Normalize-ToArray {
 }
 
 function Resolve-NinjaBaseUrl([string]$InstanceValue) {
+    # Maps instance values to base URLs
     if ([string]::IsNullOrWhiteSpace($InstanceValue)) { return "https://eu.ninjarmm.com" }
     $v = $InstanceValue.Trim()
     switch -Regex ($v.ToLowerInvariant()) {
@@ -99,11 +106,16 @@ function Resolve-NinjaBaseUrl([string]$InstanceValue) {
 }
 
 function Get-OAuthToken {
+    <#
+      Retrieves a raw OAuth token for direct upload calls (multipart).
+      This is independent from the NinjaOneDocs module session.
+    #>
     param(
         [Parameter(Mandatory=$true)][string]$BaseUrl,
         [Parameter(Mandatory=$true)][string]$ClientId,
         [Parameter(Mandatory=$true)][string]$ClientSecret
     )
+
     $tokenUrl = "$($BaseUrl.TrimEnd('/'))/ws/oauth/token"
     $resp = Invoke-RestMethod -Method Post `
         -Uri $tokenUrl `
@@ -114,11 +126,13 @@ function Get-OAuthToken {
             client_secret = $ClientSecret
             scope         = "monitoring management"
         }
+
     if (-not $resp -or -not $resp.access_token) { throw "OAuth token missing from response." }
     return $resp.access_token
 }
 
 function Convert-EpochToLocalStringSafe([object]$ep) {
+    # Converts Unix epoch seconds to local datetime string (dd/MM/yyyy HH:mm:ss)
     if ($null -eq $ep) { return "" }
     try {
         if ($ep -is [double]) { $ep = [int64][math]::Floor($ep) }
@@ -133,9 +147,12 @@ function Convert-EpochToLocalStringSafe([object]$ep) {
 }
 
 function Get-ReportMonthInfo {
+    <#
+      Determines the report month boundaries.
+      If ReportMonth is empty, uses the previous month.
+    #>
     param([string]$Yyyymm)
 
-    # Determine reporting month boundaries
     if ($Yyyymm -and $Yyyymm -match '^\d{6}$') {
         $y = [int]$Yyyymm.Substring(0,4)
         $m = [int]$Yyyymm.Substring(4,2)
@@ -149,7 +166,7 @@ function Get-ReportMonthInfo {
     $start = $dt
     $end   = $dt.AddMonths(1).AddSeconds(-1)
 
-    # Italian month label (Title Case)
+    # Use Italian month label (keeps your previous behavior)
     $it  = [System.Globalization.CultureInfo]::GetCultureInfo("it-IT")
     $rawLabel = $dt.ToString("MMMM yyyy", $it)
     $label = ($it.TextInfo.ToTitleCase($rawLabel))
@@ -162,18 +179,22 @@ function Get-ReportMonthInfo {
     }
 }
 
-# -------------------- KB helpers (best-effort overwrite) --------------------
+# ---------- KB helpers (overwrite behavior) ----------
 function Get-OrgKbArticlesByName {
+    <#
+      Tries a few variants because KB endpoints are not always consistent between tenants.
+    #>
     param(
         [Parameter(Mandatory)][int]$OrganizationId,
         [Parameter(Mandatory)][string]$ArticleName
     )
-    # Note: endpoints can differ between tenants; try multiple variants.
+
     $tries = @(
-        @{ Path="knowledgebase/organization/articles";      Q="organizationId=$OrganizationId&articleName=$([uri]::EscapeDataString($ArticleName))" },
-        @{ Path="v2/knowledgebase/organization/articles";   Q="organizationId=$OrganizationId&articleName=$([uri]::EscapeDataString($ArticleName))" },
+        @{ Path="knowledgebase/organization/articles"; Q="organizationId=$OrganizationId&articleName=$([uri]::EscapeDataString($ArticleName))" },
+        @{ Path="v2/knowledgebase/organization/articles"; Q="organizationId=$OrganizationId&articleName=$([uri]::EscapeDataString($ArticleName))" },
         @{ Path="api/v2/knowledgebase/organization/articles"; Q="organizationId=$OrganizationId&articleName=$([uri]::EscapeDataString($ArticleName))" }
     )
+
     foreach ($t in $tries) {
         try {
             $resp = Invoke-NinjaOneRequest -Method GET -Path $t.Path -QueryParams $t.Q
@@ -187,7 +208,6 @@ function Get-OrgKbArticlesByName {
 function Remove-KbArticleById {
     param([Parameter(Mandatory)][int]$Id)
 
-    # Note: DELETE may not be enabled in all tenants; this is best-effort.
     $pathsToTry = @(
         ("knowledgebase/articles/{0}" -f $Id),
         ("v2/knowledgebase/articles/{0}" -f $Id),
@@ -202,11 +222,14 @@ function Remove-KbArticleById {
         } catch { }
     }
 
-    Write-Log ("Unable to delete KB article id={0}. Upload may duplicate." -f $Id) "WARN"
+    Write-Log ("Unable to delete KB article id={0} (DELETE not available?). Upload may duplicate." -f $Id) "WARN"
     return $false
 }
 
 function Upload-FileToOrgKbRoot {
+    <#
+      Uploads a file into the Organization Knowledge Base ROOT (no folderPath/folderId).
+    #>
     param(
         [Parameter(Mandatory=$true)][string]$BaseUrl,
         [Parameter(Mandatory=$true)][string]$AccessToken,
@@ -224,8 +247,6 @@ function Upload-FileToOrgKbRoot {
     )
 
     $multipart = New-Object System.Net.Http.MultipartFormDataContent
-
-    # Org KB root upload expects ONLY organizationId
     $multipart.Add((New-Object System.Net.Http.StringContent($OrganizationId.ToString())), "organizationId")
 
     $stream = [System.IO.File]::OpenRead($FilePath)
@@ -233,8 +254,6 @@ function Upload-FileToOrgKbRoot {
         $fileContent = New-Object System.Net.Http.StreamContent($stream)
         $fileContent.Headers.ContentType =
             [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse("application/octet-stream")
-
-        # Field name must be "files" (plural)
         $multipart.Add($fileContent, "files", [System.IO.Path]::GetFileName($FilePath))
 
         $base = $BaseUrl.TrimEnd('/')
@@ -248,7 +267,6 @@ function Upload-FileToOrgKbRoot {
             Write-Log ("Uploading to: {0}" -f $u) "INFO"
             $resp = $http.PostAsync($u, $multipart).Result
             $body = $resp.Content.ReadAsStringAsync().Result
-
             if ($resp.IsSuccessStatusCode) {
                 Write-Log "Upload OK." "INFO"
                 return $true
@@ -266,16 +284,21 @@ function Upload-FileToOrgKbRoot {
     }
 }
 
-# -------------------- XLSX writer (2 sheets + highlight style) --------------------
+# ---------- XLSX writer (minimal OpenXML, no external modules required) ----------
 function New-MinimalXlsxFromTables {
     <#
-      Creates a minimal valid .xlsx with multiple worksheets and a small styles.xml.
-      - All values are written as inline strings.
-      - Summary rows with PatchCount=0 get a light red fill.
+      Creates a minimal valid .xlsx with multiple worksheets and a tiny styles.xml.
+      - Writes all values as inline strings.
+      - Adds one highlight style (light red fill) applied to rows where PatchCount == 0
+        on any sheet whose name ends with "Summary".
+      IMPORTANT: uses IDictionary + GetEnumerator() to preserve insertion order.
     #>
     param(
-        [Parameter(Mandatory=$true)][hashtable]$Sheets,  # sheetName -> object[] rows
-        [Parameter(Mandatory=$true)][string]$Path
+        [Parameter(Mandatory=$true)]
+        [System.Collections.IDictionary]$Sheets,  # <-- preserves [ordered] insertion order
+
+        [Parameter(Mandatory=$true)]
+        [string]$Path
     )
 
     Add-Type -AssemblyName System.IO.Compression
@@ -303,7 +326,7 @@ function New-MinimalXlsxFromTables {
         return "<c r=`"$r`" t=`"inlineStr`"><is><t>$t</t></is></c>"
     }
 
-    # style 0 = default, style 1 = red fill
+    # Styles: 0 = default, 1 = red fill
     $stylesXml = @"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
@@ -330,13 +353,17 @@ function New-MinimalXlsxFromTables {
     $sheetParts   = @()
 
     $sheetId = 0
-    foreach ($sheetName in $Sheets.Keys) {
+
+    # IMPORTANT: enumerator preserves insertion order from [ordered]@
+    foreach ($entry in $Sheets.GetEnumerator()) {
+        $sheetName = [string]$entry.Key
+        $rows      = @($entry.Value)
+
         $sheetId++
         $rid = "rId$sheetId"
         $sheetFile = "xl/worksheets/sheet$sheetId.xml"
         $sheetEntries += [pscustomobject]@{ name=$sheetName; id=$sheetId; rid=$rid; file=$sheetFile }
 
-        $rows = @($Sheets[$sheetName])
         $headers = @()
         if ($rows.Count -gt 0) { $headers = $rows[0].PSObject.Properties.Name }
 
@@ -359,12 +386,12 @@ function New-MinimalXlsxFromTables {
         for ($i=0; $i -lt $rows.Count; $i++) {
             $rowIndex = $i + 2
 
-            # Apply style only for Summary rows where PatchCount == 0
+            # Highlight rows with PatchCount == 0 on any *Summary sheet
             $applyStyle = 0
-            if ($sheetName -eq "Summary") {
+            if ($sheetName -like "*Summary") {
                 try {
-                    $pc = $rows[$i].PSObject.Properties["PatchCount"].Value
-                    if ($null -ne $pc -and [int]$pc -eq 0) { $applyStyle = 1 }
+                    $pcProp = $rows[$i].PSObject.Properties["PatchCount"]
+                    if ($pcProp -and [int]$pcProp.Value -eq 0) { $applyStyle = 1 }
                 } catch {}
             }
 
@@ -401,7 +428,7 @@ $($sheetsXml.ToString().TrimEnd())
 </workbook>
 "@
 
-    # root relationships
+    # Root relationships
     $relsXml = @"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -409,7 +436,7 @@ $($sheetsXml.ToString().TrimEnd())
 </Relationships>
 "@
 
-    # workbook relationships (sheets + styles)
+    # Workbook relationships (sheets + styles)
     $wbRels = New-Object System.Text.StringBuilder
     foreach ($e in $sheetEntries) {
         [void]$wbRels.AppendLine(("  <Relationship Id=`"{0}`" Type=`"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet`" Target=`"worksheets/sheet{1}.xml`"/>" -f $e.rid, $e.id))
@@ -423,7 +450,7 @@ $($wbRels.ToString().TrimEnd())
 </Relationships>
 "@
 
-    # content types
+    # Content types
     $ct = New-Object System.Text.StringBuilder
     [void]$ct.AppendLine('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>')
     [void]$ct.AppendLine('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">')
@@ -437,7 +464,6 @@ $($wbRels.ToString().TrimEnd())
     [void]$ct.AppendLine('</Types>')
     $contentTypesXml = $ct.ToString()
 
-    # create XLSX zip
     if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
 
     $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew)
@@ -468,7 +494,94 @@ $($wbRels.ToString().TrimEnd())
     finally { $fs.Dispose() }
 }
 
-# -------------------- Load module + connect --------------------
+function Build-SummaryRows {
+    <#
+      Builds a per-device summary (PatchCount + LastPatchAt).
+      DetailSorted can be empty (e.g. SW patching not enabled).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.Generic.List[object]]$DeviceList,
+
+        [AllowEmptyCollection()]
+        [object[]]$DetailSorted = @()
+    )
+
+    $counts = @{}
+    $latest = @{}
+    foreach ($dev in $DeviceList) {
+        $counts[[int]$dev.DeviceId] = 0
+        $latest[[int]$dev.DeviceId] = ""
+    }
+
+    foreach ($r in $DetailSorted) {
+        $did = [int]$r.DeviceId
+        $counts[$did] = [int]$counts[$did] + 1
+
+        try {
+            $dt = [datetime]::ParseExact($r.InstalledAt, "dd/MM/yyyy HH:mm:ss", $null)
+            if ($latest[$did] -eq "") {
+                $latest[$did] = $r.InstalledAt
+            } else {
+                $cur = [datetime]::ParseExact([string]$latest[$did], "dd/MM/yyyy HH:mm:ss", $null)
+                if ($dt -gt $cur) { $latest[$did] = $r.InstalledAt }
+            }
+        } catch { }
+    }
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($dev in $DeviceList) {
+        $did = [int]$dev.DeviceId
+        $rows.Add([pscustomobject]@{
+            Device      = [string]$dev.DeviceName
+            PatchCount  = [int]$counts[$did]
+            LastPatchAt = [string]$latest[$did]
+        }) | Out-Null
+    }
+
+    return @(
+        $rows |
+        Sort-Object @{Expression={ $_.PatchCount }; Descending=$false },
+                    @{Expression={ $_.Device }; Descending=$false }
+    )
+}
+
+function Get-DevicePatchInstalls {
+    <#
+      Calls per-device endpoints:
+        /v2/device/{id}/os-patch-installs
+        /v2/device/{id}/software-patch-installs
+      Tries multiple path prefixes to support different tenant routing.
+    #>
+    param(
+        [Parameter(Mandatory)][int]$DeviceId,
+        [Parameter(Mandatory)][string]$EndpointSuffix,  # "os-patch-installs" or "software-patch-installs"
+        [Parameter(Mandatory)][long]$AfterEpoch,
+        [Parameter(Mandatory)][long]$BeforeEpoch,
+        [Parameter(Mandatory)][string]$Status,
+        [Parameter(Mandatory)][int]$PageSize
+    )
+
+    $pathsToTry = @(
+        ("v2/device/{0}/{1}" -f $DeviceId, $EndpointSuffix),
+        ("device/{0}/{1}"    -f $DeviceId, $EndpointSuffix),
+        ("api/v2/device/{0}/{1}" -f $DeviceId, $EndpointSuffix)
+    )
+
+    $qp = "installedAfter=$AfterEpoch&installedBefore=$BeforeEpoch&status=$Status&pageSize=$PageSize"
+
+    foreach ($p in $pathsToTry) {
+        try {
+            return (Invoke-NinjaOneRequest -Method GET -Path $p -QueryParams $qp)
+        } catch {
+            # Try next path variant
+        }
+    }
+
+    throw "Endpoint not reachable: /device/$DeviceId/$EndpointSuffix"
+}
+
+# -------------------- Module load + Connect (NinjaOneDocs) --------------------
 try {
     $moduleName = "NinjaOneDocs"
     if (-not (Get-Module -ListAvailable -Name $moduleName)) {
@@ -496,14 +609,14 @@ Write-Log ("Connected (instance={0})." -f $NinjaOneInstance) "INFO"
 try {
     $mi = Get-ReportMonthInfo -Yyyymm $ReportMonth
 
-    # Unix timestamp (seconds), UTC boundaries
+    # Unix timestamps (seconds), UTC boundaries
     $afterEpoch  = [DateTimeOffset]::new($mi.Start.ToUniversalTime()).ToUnixTimeSeconds()
     $beforeEpoch = [DateTimeOffset]::new($mi.End.ToUniversalTime()).ToUnixTimeSeconds()
 
     Write-Log ("OrgId: {0}" -f $Customer) "INFO"
     Write-Log ("Month: {0} | Range: {1} -> {2}" -f $mi.LabelIt, $mi.Start, $mi.End) "INFO"
 
-    # Resolve organization name
+    # Resolve org name (best-effort)
     $orgName = ("OrgId {0}" -f $Customer)
     try {
         $orgs = Invoke-NinjaOneRequest -Method GET -Path "organizations"
@@ -512,7 +625,7 @@ try {
     } catch {}
     Write-Log ("Organization: {0}" -f $orgName) "INFO"
 
-    # Get devices in org (Windows only)
+    # Load org devices and keep Windows only
     Write-Log "Fetching organization devices..." "INFO"
     $orgDevices = @(Normalize-ToArray (Invoke-NinjaOneRequest -Method GET -Path ("organization/{0}/devices" -f $Customer)))
 
@@ -532,132 +645,129 @@ try {
         }
         if (-not $nm) { $nm = "DeviceId $did" }
 
-        $deviceList.Add([pscustomobject]@{ DeviceId=$did; DeviceName=$nm; NodeClass=$nodeClass }) | Out-Null
+        $deviceList.Add([pscustomobject]@{
+            DeviceId   = $did
+            DeviceName = $nm
+            NodeClass  = $nodeClass
+        }) | Out-Null
     }
 
     Write-Log ("Org devices loaded (Windows only): {0}" -f $deviceList.Count) "INFO"
 
-    # Fetch patch installs per device via /v2/device/{id}/os-patch-installs
-    $detailRows = New-Object System.Collections.Generic.List[object]
+    # Collect details (OS + Software) in separate lists
+    $osDetailRows = New-Object System.Collections.Generic.List[object]
+    $swDetailRows = New-Object System.Collections.Generic.List[object]
 
     $i = 0
     foreach ($dev in $deviceList) {
         $i++
         if (($i % $LogEveryNDevices) -eq 1) {
-            Write-Log ("Fetching patch installs: device {0}/{1} (deviceId={2})" -f $i, $deviceList.Count, $dev.DeviceId) "INFO"
+            Write-Log ("Processing devices: {0}/{1}" -f $i, $deviceList.Count) "INFO"
         }
 
+        # ---------------- OS patch installs ----------------
         try {
-            # Try multiple path variants (tenants differ)
-            $pathsToTry = @(
-                ("v2/device/{0}/os-patch-installs" -f $dev.DeviceId),
-                ("device/{0}/os-patch-installs" -f $dev.DeviceId),
-                ("api/v2/device/{0}/os-patch-installs" -f $dev.DeviceId)
-            )
+            $osResp = Get-DevicePatchInstalls -DeviceId $dev.DeviceId -EndpointSuffix "os-patch-installs" `
+                -AfterEpoch $afterEpoch -BeforeEpoch $beforeEpoch -Status $PatchStatus -PageSize $PageSize
 
-            $resp = $null
-            foreach ($p in $pathsToTry) {
-                try {
-                    $qp = "installedAfter=$afterEpoch&installedBefore=$beforeEpoch&status=$PatchStatus&pageSize=$PageSize"
-                    $resp = Invoke-NinjaOneRequest -Method GET -Path $p -QueryParams $qp
-                    if ($resp) { break }
-                } catch { }
-            }
-            if (-not $resp) { throw "Patch installs endpoint not reachable for deviceId=$($dev.DeviceId)" }
+            $osItems = @()
+            if ($osResp -and (Has-Prop $osResp 'items')) { $osItems = @(Normalize-ToArray $osResp.items) }
+            elseif ($osResp) { $osItems = @(Normalize-ToArray $osResp) }
 
-            $items = @()
-            if (Has-Prop $resp 'items') { $items = @(Normalize-ToArray $resp.items) }
-            else { $items = @(Normalize-ToArray $resp) }
-
-            foreach ($pi in $items) {
+            foreach ($pi in $osItems) {
                 if (-not $pi) { continue }
 
                 $pname = [string](Get-Prop $pi 'name')
                 if ($ExcludeDefenderIntel -and $pname -like "*Security Intelligence Update for Microsoft Defender Antivirus*") { continue }
 
-                $installedAtRaw = Get-Prop $pi 'installedAt'
-                $installedAtStr = Convert-EpochToLocalStringSafe $installedAtRaw
-
-                # IMPORTANT: PatchInstalls sheet includes device NAME (not deviceId)
-                $detailRows.Add([pscustomobject]@{
+                $osDetailRows.Add([pscustomobject]@{
                     PatchName   = $pname
                     KBNumber    = [string](Get-Prop $pi 'kbNumber')
                     Device      = [string]$dev.DeviceName
-                    InstalledAt = $installedAtStr
+                    InstalledAt = (Convert-EpochToLocalStringSafe (Get-Prop $pi 'installedAt'))
+                    DeviceId    = [int]$dev.DeviceId  # internal only (not exported)
                 }) | Out-Null
             }
         }
         catch {
             if ($ContinueOnDeviceError) {
-                Write-Log ("WARN deviceId={0} ({1}) skipped: {2}" -f $dev.DeviceId, $dev.DeviceName, $_.Exception.Message) "WARN"
-                continue
+                Write-Log ("WARN OS patches: deviceId={0} ({1}) - {2}" -f $dev.DeviceId, $dev.DeviceName, $_.Exception.Message) "WARN"
+            } else {
+                throw
             }
-            throw
+        }
+
+        # -------------- Software patch installs --------------
+        try {
+            $swResp = Get-DevicePatchInstalls -DeviceId $dev.DeviceId -EndpointSuffix "software-patch-installs" `
+                -AfterEpoch $afterEpoch -BeforeEpoch $beforeEpoch -Status $PatchStatus -PageSize $PageSize
+
+            $swItems = @()
+            if ($swResp -and (Has-Prop $swResp 'items')) { $swItems = @(Normalize-ToArray $swResp.items) }
+            elseif ($swResp) { $swItems = @(Normalize-ToArray $swResp) }
+
+            foreach ($pi in $swItems) {
+                if (-not $pi) { continue }
+
+                $pname = [string](Get-Prop $pi 'name')
+
+                $swDetailRows.Add([pscustomobject]@{
+                    PatchName   = $pname
+                    KBNumber    = [string](Get-Prop $pi 'kbNumber')  # may be empty for SW patches
+                    Device      = [string]$dev.DeviceName
+                    InstalledAt = (Convert-EpochToLocalStringSafe (Get-Prop $pi 'installedAt'))
+                    DeviceId    = [int]$dev.DeviceId  # internal only (not exported)
+                }) | Out-Null
+            }
+        }
+        catch {
+            if ($ContinueOnDeviceError) {
+                Write-Log ("WARN SW patches: deviceId={0} ({1}) - {2}" -f $dev.DeviceId, $dev.DeviceName, $_.Exception.Message) "WARN"
+            } else {
+                throw
+            }
         }
     }
 
-    Write-Log ("Patch installs collected: {0}" -f $detailRows.Count) "INFO"
+    Write-Log ("OS patch installs collected: {0}" -f $osDetailRows.Count) "INFO"
+    Write-Log ("SW patch installs collected: {0}" -f $swDetailRows.Count) "INFO"
 
-    $detailSorted = @(
-        $detailRows |
+    # Sort details (keep DeviceId internally for summary)
+    $osDetailSorted = @(
+        $osDetailRows |
+        Sort-Object @{Expression={ $_.Device }; Descending=$false },
+                    @{Expression={ $_.InstalledAt }; Descending=$true },
+                    @{Expression={ $_.PatchName }; Descending=$false }
+    )
+    $swDetailSorted = @(
+        $swDetailRows |
         Sort-Object @{Expression={ $_.Device }; Descending=$false },
                     @{Expression={ $_.InstalledAt }; Descending=$true },
                     @{Expression={ $_.PatchName }; Descending=$false }
     )
 
-    # Build Summary (still uses device list, and counts by device name)
-    $counts = @{}
-    $latest = @{}
-    foreach ($dev in $deviceList) {
-        $counts[[string]$dev.DeviceName] = 0
-        $latest[[string]$dev.DeviceName] = ""
-    }
+    # Build summaries (arrays can be empty)
+    $osSummarySorted = Build-SummaryRows -DeviceList $deviceList -DetailSorted $osDetailSorted
+    $swSummarySorted = Build-SummaryRows -DeviceList $deviceList -DetailSorted $swDetailSorted
 
-    foreach ($r in $detailSorted) {
-        $dn = [string]$r.Device
-        $counts[$dn] = [int]$counts[$dn] + 1
+    # Export sheets without DeviceId columns
+    $osDetailForXlsx = @($osDetailSorted | Select-Object PatchName, KBNumber, Device, InstalledAt)
+    $swDetailForXlsx = @($swDetailSorted | Select-Object PatchName, KBNumber, Device, InstalledAt)
 
-        # Track most recent patch date (best-effort parse)
-        try {
-            $dt = [datetime]::ParseExact($r.InstalledAt, "dd/MM/yyyy HH:mm:ss", $null)
-            if ($latest[$dn] -eq "") {
-                $latest[$dn] = $r.InstalledAt
-            } else {
-                $cur = [datetime]::ParseExact([string]$latest[$dn], "dd/MM/yyyy HH:mm:ss", $null)
-                if ($dt -gt $cur) { $latest[$dn] = $r.InstalledAt }
-            }
-        } catch { }
-    }
-
-    $summaryRows = New-Object System.Collections.Generic.List[object]
-    foreach ($dev in $deviceList) {
-        $dn = [string]$dev.DeviceName
-        $summaryRows.Add([pscustomobject]@{
-            Device      = $dn
-            PatchCount  = [int]$counts[$dn]
-            LastPatchAt = [string]$latest[$dn]
-        }) | Out-Null
-    }
-
-    # Sort: devices with 0 patches first
-    $summarySorted = @(
-        $summaryRows |
-        Sort-Object @{Expression={ $_.PatchCount }; Descending=$false },
-                    @{Expression={ $_.Device }; Descending=$false }
-    )
-
-    # Create XLSX with 2 sheets: Summary first, PatchInstalls second
+    # ---- Create XLSX (4 sheets) ----
     $safeOrg  = ($orgName -replace '[\\/:*?"<>|]+', ' ').Trim()
     $fileName = ("{0} {1} - {2}.xlsx" -f $DocBaseTitle, $mi.LabelIt, $safeOrg)
     $xlsxPath = Join-Path $outDir $fileName
 
     Write-Log ("Creating XLSX: {0}" -f $xlsxPath) "INFO"
     New-MinimalXlsxFromTables -Sheets ([ordered]@{
-        "Summary"       = $summarySorted
-        "PatchInstalls" = $detailSorted
+        "OS Summary"       = $osSummarySorted
+        "OS PatchInstalls" = $osDetailForXlsx
+        "SW Summary"       = $swSummarySorted
+        "SW PatchInstalls" = $swDetailForXlsx
     }) -Path $xlsxPath
 
-    # Best-effort overwrite in KB: delete same-name articles, then upload
+    # ---- Overwrite KB: delete same-name articles, then upload ----
     $kbName = [System.IO.Path]::GetFileNameWithoutExtension($fileName)
     Write-Log ("Ensuring overwrite in Org KB root. Target name: {0}" -f $kbName) "INFO"
 
